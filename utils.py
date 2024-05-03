@@ -132,6 +132,25 @@ def ipadapter_model_loader(file):
         model = st_model
         del st_model
 
+    # WHY        
+    if any(key.startswith("id_adapter") for key in model.keys()):
+        st_model = {"image_proj": {}, "ip_adapter": {}}
+        for key in model.keys():
+            tensor = model[key]
+            if key.startswith("id_adapter_attn_layers"):
+                key = key.replace("id_adapter_attn_layers.", "")
+                key = key.replace(".id_to_k.", ".to_k_ip.")
+                key = key.replace(".id_to_v.", ".to_v_ip.")
+                
+                st_model["ip_adapter"][key] = tensor
+            else:
+                key = key.replace("id_adapter.", "")
+                st_model["image_proj"][key] = tensor
+
+        model = st_model
+        model["id_adapter"] = True
+        del st_model
+
     if not "ip_adapter" in model.keys() or not model["ip_adapter"]:
         raise Exception("invalid IPAdapter model {}".format(file))
 
@@ -143,14 +162,14 @@ def ipadapter_model_loader(file):
 
     return model
 
-def insightface_loader(provider):
+def insightface_loader(provider, name="buffalo_l"):
     try:
         from insightface.app import FaceAnalysis
     except ImportError as e:
         raise Exception(e)
 
     path = os.path.join(folder_paths.models_dir, "insightface")
-    model = FaceAnalysis(name="buffalo_l", root=path, providers=[provider + 'ExecutionProvider',])
+    model = FaceAnalysis(name=name, root=path, providers=[provider + 'ExecutionProvider',])
     model.prepare(ctx_id=0, det_size=(640, 640))
     return model
 

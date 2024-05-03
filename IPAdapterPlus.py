@@ -16,7 +16,7 @@ try:
 except ImportError:
     import torchvision.transforms as T
 
-from .image_proj_models import MLPProjModel, MLPProjModelFaceId, ProjModelFaceIdPlus, Resampler, ImageProjModel
+from .image_proj_models import MLPProjModel, MLPProjModelFaceId, ProjModelFaceIdPlus, Resampler, ImageProjModel, IDEncoder
 from .CrossAttentionPatch import CrossAttentionPatch
 from .utils import (
     encode_image_masked,
@@ -47,7 +47,7 @@ WEIGHT_TYPES = ["linear", "ease in", "ease out", 'ease in-out', 'reverse in-out'
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 """
 class IPAdapter(nn.Module):
-    def __init__(self, ipadapter_model, cross_attention_dim=1024, output_cross_attention_dim=1024, clip_embeddings_dim=1024, clip_extra_context_tokens=4, is_sdxl=False, is_plus=False, is_full=False, is_faceid=False, is_portrait_unnorm=False):
+    def __init__(self, ipadapter_model, cross_attention_dim=1024, output_cross_attention_dim=1024, clip_embeddings_dim=1024, clip_extra_context_tokens=4, is_sdxl=False, is_plus=False, is_full=False, is_faceid=False, is_portrait_unnorm=False, is_id_adapter=False):
         super().__init__()
 
         self.clip_embeddings_dim = clip_embeddings_dim
@@ -58,6 +58,7 @@ class IPAdapter(nn.Module):
         self.is_full = is_full
         self.is_plus = is_plus
         self.is_portrait_unnorm = is_portrait_unnorm
+        self.is_id_adapter = is_id_adapter
 
         if is_faceid and not is_portrait_unnorm:
             self.image_proj_model = self.init_proj_faceid()
@@ -65,6 +66,8 @@ class IPAdapter(nn.Module):
             self.image_proj_model = self.init_proj_full()
         elif is_plus or is_portrait_unnorm:
             self.image_proj_model = self.init_proj_plus()
+        elif is_id_adapter:
+            self.image_proj_model = self.init_id_adapter()
         else:
             self.image_proj_model = self.init_proj()
 
@@ -77,6 +80,10 @@ class IPAdapter(nn.Module):
             clip_embeddings_dim=self.clip_embeddings_dim,
             clip_extra_context_tokens=self.clip_extra_context_tokens
         )
+        return image_proj_model
+        
+    def init_id_adapter(self):
+        image_proj_model = IDEncoder()
         return image_proj_model
 
     def init_proj_plus(self):
@@ -124,6 +131,11 @@ class IPAdapter(nn.Module):
     @torch.inference_mode()
     def get_image_embeds_faceid_plus(self, face_embed, clip_embed, s_scale, shortcut):
         embeds = self.image_proj_model(face_embed, clip_embed, scale=s_scale, shortcut=shortcut)
+        return embeds
+    
+    @torch.inference_mode()
+    def get_image_embeds_id_adapter(self, face_embed, clip_embeds):
+        embeds = self.image_proj_model(face_embed, clip_embeds)
         return embeds
 
 class To_KV(nn.Module):
@@ -179,6 +191,7 @@ def ipadapter_execute(model,
     is_faceid = is_portrait or "0.to_q_lora.down.weight" in ipadapter["ip_adapter"] or is_portrait_unnorm
     is_plus = (is_full or "latents" in ipadapter["image_proj"] or "perceiver_resampler.proj_in.weight" in ipadapter["image_proj"]) and not is_portrait_unnorm
     is_faceidv2 = "faceidplusv2" in ipadapter
+    is_id_adapter = "id_adapter" in ipadapter
     output_cross_attention_dim = ipadapter["ip_adapter"]["1.to_k_ip.weight"].shape[1]
     is_sdxl = output_cross_attention_dim == 2048
 
@@ -223,7 +236,7 @@ def ipadapter_execute(model,
 
     img_comp_cond_embeds = None
     face_cond_embeds = None
-    if is_faceid:
+    if is_faceid or is_id_adapter:
         if insightface is None:
             raise Exception("Insightface model is required for FaceID models")
 
@@ -254,28 +267,43 @@ def ipadapter_execute(model,
         image = torch.stack(image)
         del image_iface, face
 
-    if image is not None:
-        img_cond_embeds = encode_image_masked(clipvision, image, batch_size=encode_batch_size)
-        if image_composition is not None:
-            img_comp_cond_embeds = encode_image_masked(clipvision, image_composition, batch_size=encode_batch_size)
+    img_vit_hidden_cond = None
+    img_vit_hidden_uncond = None
 
-        if is_plus:
-            img_cond_embeds = img_cond_embeds.penultimate_hidden_states
-            image_negative = image_negative if image_negative is not None else torch.zeros([1, 224, 224, 3])
-            img_uncond_embeds = encode_image_masked(clipvision, image_negative, batch_size=encode_batch_size).penultimate_hidden_states
-            if image_composition is not None:
-                img_comp_cond_embeds = img_comp_cond_embeds.penultimate_hidden_states
+    if image is not None:
+        if is_id_adapter:
+            id_cond_vit, id_vit_hidden = clipvision["encode"](image.to("cuda").permute(0, 3, 1, 2), device="cuda", dtype=torch.float16) # TODO, handle batch dimension
+            # squeeze face_cond_embeds ?
+            img_cond_embeds = torch.cat([face_cond_embeds.squeeze(0), id_cond_vit], dim=-1)
+            img_uncond_embeds = torch.zeros_like(img_cond_embeds)
+
+            img_vit_hidden_uncond = []
+            for layer_idx in range(0, len(id_vit_hidden)):
+                img_vit_hidden_uncond.append(torch.zeros_like(id_vit_hidden[layer_idx]))
+
+            img_vit_hidden_cond = id_vit_hidden
         else:
-            img_cond_embeds = img_cond_embeds.image_embeds if not is_faceid else face_cond_embeds
-            if image_negative is not None and not is_faceid:
-                img_uncond_embeds = encode_image_masked(clipvision, image_negative, batch_size=encode_batch_size).image_embeds
-            else:
-                img_uncond_embeds = torch.zeros_like(img_cond_embeds)
+            img_cond_embeds = encode_image_masked(clipvision, image, batch_size=encode_batch_size)
             if image_composition is not None:
-                img_comp_cond_embeds = img_comp_cond_embeds.image_embeds
-        del image_negative, image_composition
-        
-        image = None if not is_faceid else image # if it's face_id we need the cropped face for later
+                img_comp_cond_embeds = encode_image_masked(clipvision, image_composition, batch_size=encode_batch_size)
+
+            if is_plus:
+                img_cond_embeds = img_cond_embeds.penultimate_hidden_states
+                image_negative = image_negative if image_negative is not None else torch.zeros([1, 224, 224, 3])
+                img_uncond_embeds = encode_image_masked(clipvision, image_negative, batch_size=encode_batch_size).penultimate_hidden_states
+                if image_composition is not None:
+                    img_comp_cond_embeds = img_comp_cond_embeds.penultimate_hidden_states
+            else:
+                img_cond_embeds = img_cond_embeds.image_embeds if not is_faceid else face_cond_embeds
+                if image_negative is not None and not is_faceid:
+                    img_uncond_embeds = encode_image_masked(clipvision, image_negative, batch_size=encode_batch_size).image_embeds
+                else:
+                    img_uncond_embeds = torch.zeros_like(img_cond_embeds)
+                if image_composition is not None:
+                    img_comp_cond_embeds = img_comp_cond_embeds.image_embeds
+            del image_negative, image_composition
+            
+            image = None if not is_faceid else image # if it's face_id w
     elif pos_embed is not None:
         img_cond_embeds = pos_embed
 
@@ -343,12 +371,17 @@ def ipadapter_execute(model,
         is_full=is_full,
         is_faceid=is_faceid,
         is_portrait_unnorm=is_portrait_unnorm,
+        is_id_adapter=is_id_adapter,
     ).to(device, dtype=dtype)
+
 
     if is_faceid and is_plus:
         cond = ipa.get_image_embeds_faceid_plus(face_cond_embeds, img_cond_embeds, weight_faceidv2, is_faceidv2)
         # TODO: check if noise helps with the uncond face embeds
         uncond = ipa.get_image_embeds_faceid_plus(torch.zeros_like(face_cond_embeds), img_uncond_embeds, weight_faceidv2, is_faceidv2)
+    elif is_id_adapter:
+        cond = ipa.get_image_embeds_id_adapter(img_cond_embeds, img_vit_hidden_cond)
+        uncond = ipa.get_image_embeds_id_adapter(img_uncond_embeds, img_vit_hidden_uncond)
     else:
         cond, uncond = ipa.get_image_embeds(img_cond_embeds, img_uncond_embeds)
         if img_comp_cond_embeds is not None:
@@ -547,6 +580,7 @@ class IPAdapterInsightFaceLoader:
         return {
             "required": {
                 "provider": (["CPU", "CUDA", "ROCM"], ),
+                "name": (["buffalo_l", "antelopev2"], )
             },
         }
 
@@ -554,8 +588,142 @@ class IPAdapterInsightFaceLoader:
     FUNCTION = "load_insightface"
     CATEGORY = "ipadapter/loaders"
 
-    def load_insightface(self, provider):
-        return (insightface_loader(provider),)
+    def load_insightface(self, provider, name):
+        return (insightface_loader(provider, name),)
+class IPAdapterFaceFeatures:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE", )
+            }
+        }
+    
+    CATEGORY="ipadapter"
+    FUNCTION="main"
+    RETURN_TYPES=("IMAGE",)
+
+    def main(self, image):
+        from facexlib.utils.face_restoration_helper import FaceRestoreHelper
+        from facexlib.parsing import init_parsing_model
+        import cv2
+        from basicsr.utils import img2tensor, tensor2img
+
+        from torchvision.transforms.functional import normalize, resize
+
+        face_helper = FaceRestoreHelper(
+            upscale_factor=1,
+            face_size=512,
+            crop_ratio=(1, 1),
+            det_model='retinaface_resnet50',
+            save_ext='png',
+            device="cuda",
+        )
+
+        face_helper.face_parse = None
+        face_helper.face_parse = init_parsing_model(model_name='bisenet', device="cuda")
+
+        def resize_numpy_image_long(image, resize_long_edge=768):
+            h, w = image.shape[:2]
+            if max(h, w) <= resize_long_edge:
+                return image
+            k = resize_long_edge / max(h, w)
+            h = int(h * k)
+            w = int(w * k)
+            image = cv2.resize(image, (w, h), interpolation=cv2.INTER_LANCZOS4)
+            return image
+        
+        import numpy as np
+        def tensor2nump(image):
+            return np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
+
+        id_image = tensor2nump(image)
+
+        id_image = resize_numpy_image_long(id_image, 1024)
+        image_bgr = cv2.cvtColor(id_image, cv2.COLOR_RGB2BGR)
+
+        face_helper.clean_all()
+
+        face_helper.read_image(image_bgr)
+        face_helper.get_face_landmarks_5(only_center_face=True)
+        face_helper.align_warp_face()
+        if len(face_helper.cropped_faces) == 0:
+            raise RuntimeError('facexlib align face fail')
+        align_face = face_helper.cropped_faces[0]
+
+        input = img2tensor(align_face, bgr2rgb=True).unsqueeze(0) / 255.0
+        input = input.to("cuda")
+        parsing_out = face_helper.face_parse(normalize(input, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]))[0]
+        parsing_out = parsing_out.argmax(dim=1, keepdim=True)
+        bg_label = [0, 16, 18, 7, 8, 9, 14, 15]
+        bg = sum(parsing_out == i for i in bg_label).bool()
+        white_image = torch.ones_like(input)
+        # only keep the face features
+
+
+        def to_gray(img):
+            x = 0.299 * img[:, 0:1] + 0.587 * img[:, 1:2] + 0.114 * img[:, 2:3]
+            x = x.repeat(1, 3, 1, 1)
+            return x
+
+        face_features_image = torch.where(bg, white_image, to_gray(input))
+
+        face_features_image = face_features_image.permute(0, 2, 3, 1)
+        
+        return (face_features_image,)
+
+
+
+class IPAdapterEvaClipVisionLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {}
+    
+    RETURN_TYPES = ("CLIP_VISION", )
+    FUNCTION = "main"
+    CATEGORY = "ipadapter/loaders"
+
+    def main(self):
+        from torchvision.transforms.functional import normalize, resize
+        from torchvision.transforms import InterpolationMode
+
+        from eva_clip import create_model_and_transforms
+        from eva_clip.constants import OPENAI_DATASET_MEAN, OPENAI_DATASET_STD
+
+        eva_clip, _, _ = create_model_and_transforms('EVA02-CLIP-L-14-336', 'eva_clip', force_custom_clip=True)
+        eva_clip = eva_clip.visual.to("cuda")
+
+        clip_vision_model = eva_clip
+        eva_transform_mean = getattr(clip_vision_model, 'image_mean', OPENAI_DATASET_MEAN)
+        eva_transform_std = getattr(clip_vision_model, 'image_std', OPENAI_DATASET_STD)
+        if not isinstance(eva_transform_mean, (list, tuple)):
+            eva_transform_mean = (eva_transform_mean,) * 3
+        if not isinstance(eva_transform_std, (list, tuple)):
+            eva_transform_std = (eva_transform_std,) * 3
+        eva_transform_mean = eva_transform_mean
+        eva_transform_std = eva_transform_std
+      
+
+        def encode(face_features_image, device, dtype):
+
+            face_features_image = resize(face_features_image, clip_vision_model.image_size, InterpolationMode.BICUBIC)
+            face_features_image = normalize(face_features_image, eva_transform_mean, eva_transform_std)
+            id_cond_vit, id_vit_hidden = clip_vision_model(
+                face_features_image, return_all_features=False, return_hidden=True, shuffle=False
+            )
+            id_cond_vit_norm = torch.norm(id_cond_vit, 2, 1, True)
+            id_cond_vit = torch.div(id_cond_vit, id_cond_vit_norm)
+
+            id_cond_vit = id_cond_vit.to(device=device, dtype=dtype)
+
+            for layer_idx in range(0, len(id_vit_hidden)):
+                id_vit_hidden[layer_idx] = id_vit_hidden[layer_idx].to(device=device, dtype=dtype)            
+
+            return id_cond_vit, id_vit_hidden
+        
+        return ({
+            "encode": encode 
+        }, )
 
 """
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1801,6 +1969,7 @@ NODE_CLASS_MAPPINGS = {
     "IPAdapterStyleCompositionBatch": IPAdapterStyleCompositionBatch,
     "IPAdapterMS": IPAdapterMS,
     "IPAdapterFromParams": IPAdapterFromParams,
+    "IPAdapterFaceFeatures": IPAdapterFaceFeatures,
 
     # Loaders
     "IPAdapterUnifiedLoader": IPAdapterUnifiedLoader,
@@ -1808,6 +1977,7 @@ NODE_CLASS_MAPPINGS = {
     "IPAdapterModelLoader": IPAdapterModelLoader,
     "IPAdapterInsightFaceLoader": IPAdapterInsightFaceLoader,
     "IPAdapterUnifiedLoaderCommunity": IPAdapterUnifiedLoaderCommunity,
+    "IPAdapterEvaClipVisionLoader": IPAdapterEvaClipVisionLoader,
 
     # Helpers
     "IPAdapterEncoder": IPAdapterEncoder,
