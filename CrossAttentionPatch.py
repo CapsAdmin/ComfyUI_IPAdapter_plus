@@ -2,11 +2,33 @@ import torch
 import math
 import torch.nn.functional as F
 from comfy.ldm.modules.attention import optimized_attention
-from .utils import tensor_to_size
+from .utils import tensor_to_size, interpolate_values
+
+
+def lerp_index(arr, fraction):
+    if not arr:
+        return None  # handle empty array case
+    
+    max_index = len(arr) - 1
+    # Calculate the precise float index
+    precise_index = fraction * max_index
+    # Find the indices to interpolate between
+    lower_index = int(precise_index)
+    upper_index = min(lower_index + 1, max_index)
+    
+    # Calculate the interpolated value
+    lower_value = arr[lower_index]
+    upper_value = arr[upper_index]
+    
+    # Interpolation factor
+    interpolation = precise_index - lower_index
+    
+    # Linear interpolation
+    return lower_value + interpolation * (upper_value - lower_value)
 
 class CrossAttentionPatch:
     # forward for patching
-    def __init__(self, ipadapter=None, number=0, weight=1.0, cond=None, cond_alt=None, uncond=None, weight_type="linear", mask=None, sigma_start=0.0, sigma_end=1.0, unfold_batch=False, embeds_scaling='V only'):
+    def __init__(self, ipadapter=None, number=0, weight=1.0, cond=None, cond_alt=None, uncond=None, weight_type="linear", mask=None, sigma_start=0.0, sigma_end=1.0, unfold_batch=False, embeds_scaling='V only', attn_weights=[]):
         self.weights = [weight]
         self.ipadapters = [ipadapter]
         self.conds = [cond]
@@ -18,13 +40,14 @@ class CrossAttentionPatch:
         self.sigma_ends = [sigma_end]
         self.unfold_batch = [unfold_batch]
         self.embeds_scaling = [embeds_scaling]
+        self.attn_weights = [attn_weights]
         self.number = number
         self.layers = 11 if '101_to_k_ip' in ipadapter.ip_layers.to_kvs else 16 # TODO: check if this is a valid condition to detect all models
 
         self.k_key = str(self.number*2+1) + "_to_k_ip"
         self.v_key = str(self.number*2+1) + "_to_v_ip"
 
-    def set_new_condition(self, ipadapter=None, number=0, weight=1.0, cond=None, cond_alt=None, uncond=None, weight_type="linear", mask=None, sigma_start=0.0, sigma_end=1.0, unfold_batch=False, embeds_scaling='V only'):
+    def set_new_condition(self, ipadapter=None, number=0, weight=1.0, cond=None, cond_alt=None, uncond=None, weight_type="linear", mask=None, sigma_start=0.0, sigma_end=1.0, unfold_batch=False, embeds_scaling='V only', attn_weights=[]):
         self.weights.append(weight)
         self.ipadapters.append(ipadapter)
         self.conds.append(cond)
@@ -36,6 +59,7 @@ class CrossAttentionPatch:
         self.sigma_ends.append(sigma_end)
         self.unfold_batch.append(unfold_batch)
         self.embeds_scaling.append(embeds_scaling)
+        self.attn_weights.append(attn_weights)
 
     def __call__(self, q, k, v, extra_options):
         dtype = q.dtype
@@ -54,9 +78,16 @@ class CrossAttentionPatch:
         out = optimized_attention(q, k, v, extra_options["n_heads"])
         _, _, oh, ow = extra_options["original_shape"]
 
-        for weight, cond, cond_alt, uncond, ipadapter, mask, weight_type, sigma_start, sigma_end, unfold_batch, embeds_scaling in zip(self.weights, self.conds, self.conds_alt, self.unconds, self.ipadapters, self.masks, self.weight_types, self.sigma_starts, self.sigma_ends, self.unfold_batch, self.embeds_scaling):
+        for weight, cond, cond_alt, uncond, ipadapter, mask, weight_type, sigma_start, sigma_end, unfold_batch, embeds_scaling, attn_weights in zip(self.weights, self.conds, self.conds_alt, self.unconds, self.ipadapters, self.masks, self.weight_types, self.sigma_starts, self.sigma_ends, self.unfold_batch, self.embeds_scaling, self.attn_weights):
             if sigma <= sigma_start and sigma >= sigma_end:
-                if weight_type == 'ease in':
+                if attn_weights and len(attn_weights) > 0:
+                    if isinstance(attn_weights, dict):
+                        key = "{}_{}_{}".format(extra_options["block"][0], extra_options["block"][1], extra_options["block_index"])
+                        weight = weight * attn_weights[key]# interpolate_values(attn_weights[key], f)
+                    else:
+                        weight = weight * lerp_index(attn_weights, (t_idx / self.layers))
+                        print(weight, (t_idx / self.layers))
+                elif weight_type == 'ease in':
                     weight = weight * (0.05 + 0.95 * (1 - t_idx / self.layers))
                 elif weight_type == 'ease out':
                     weight = weight * (0.05 + 0.95 * (t_idx / self.layers))

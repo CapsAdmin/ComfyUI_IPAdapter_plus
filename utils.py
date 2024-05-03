@@ -263,3 +263,44 @@ def image_to_tensor(image):
     tensor = torch.clamp(torch.from_numpy(image).float() / 255., 0, 1)
     tensor = tensor[..., [2, 1, 0]]
     return tensor
+
+def lerp(a, b, t):
+    return a + (b - a) * t
+
+def interpolate_values(values, T):
+    T = max(0, min(T, 1))
+    total_values = len(values)
+
+    if total_values < 2:
+        return values[0]
+
+    position = T * (total_values - 1)
+    index = int(position)
+    next_index = min(index + 1, total_values - 1)
+
+    T_mapped = position - index
+
+    return lerp(values[index], values[next_index], T_mapped)
+
+import json
+def read_custom_weights(json_data):
+    weights = None
+
+    if json_data != "":
+        if not json_data.startswith("[") and not json_data.startswith("{"):
+            json_data = "{" + json_data + "}"
+
+        try:
+            weights = json.loads(json_data)
+            if len(weights) == 0:
+                raise Exception("len is 0")
+            
+            if not (type(weights) is dict or type(weights) is list):
+                print(weights, type(weights))
+                raise Exception("weights is not dict or list")
+        except Exception as err:
+            print("failed to parse custom_weights", json_data)
+            print(err)
+            weights = []
+    
+    return weights

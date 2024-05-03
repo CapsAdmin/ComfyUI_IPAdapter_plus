@@ -29,6 +29,7 @@ from .utils import (
     get_clipvision_file,
     get_ipadapter_file,
     get_lora_file,
+    read_custom_weights,
 )
 
 # set the models directory
@@ -165,7 +166,8 @@ def ipadapter_execute(model,
                       unfold_batch=False,
                       embeds_scaling='V only',
                       layer_weights=None,
-                      encode_batch_size=0,):
+                      encode_batch_size=0,
+                      attn_weights=None):
     device = model_management.get_torch_device()
     dtype = model_management.unet_dtype()
     if dtype not in [torch.float32, torch.float16, torch.bfloat16]:
@@ -376,6 +378,7 @@ def ipadapter_execute(model,
         "sigma_end": sigma_end,
         "unfold_batch": unfold_batch,
         "embeds_scaling": embeds_scaling,
+        "attn_weights": attn_weights,
     }
 
     if not is_sdxl:
@@ -628,6 +631,7 @@ class IPAdapterAdvanced:
                 "image_negative": ("IMAGE",),
                 "attn_mask": ("MASK",),
                 "clip_vision": ("CLIP_VISION",),
+                "custom_weights": ("IPADPTER_ATTN_WEIGHTS", {"default": ""}),
             }
         }
 
@@ -635,7 +639,7 @@ class IPAdapterAdvanced:
     FUNCTION = "apply_ipadapter"
     CATEGORY = "ipadapter"
 
-    def apply_ipadapter(self, model, ipadapter, start_at=0.0, end_at=1.0, weight=1.0, weight_style=1.0, weight_composition=1.0, expand_style=False, weight_type="linear", combine_embeds="concat", weight_faceidv2=None, image=None, image_style=None, image_composition=None, image_negative=None, clip_vision=None, attn_mask=None, insightface=None, embeds_scaling='V only', layer_weights=None, ipadapter_params=None, encode_batch_size=0):
+    def apply_ipadapter(self, model, ipadapter, start_at=0.0, end_at=1.0, weight=1.0, weight_style=1.0, weight_composition=1.0, expand_style=False, weight_type="linear", combine_embeds="concat", weight_faceidv2=None, image=None, image_style=None, image_composition=None, image_negative=None, clip_vision=None, attn_mask=None, insightface=None, embeds_scaling='V only', layer_weights=None, ipadapter_params=None, encode_batch_size=0, custom_weights=""):
         is_sdxl = isinstance(model.model, (comfy.model_base.SDXL, comfy.model_base.SDXLRefiner, comfy.model_base.SDXL_instructpix2pix))
 
         if 'ipadapter' in ipadapter:
@@ -693,6 +697,7 @@ class IPAdapterAdvanced:
                 "insightface": insightface if insightface is not None else ipadapter['insightface']['model'] if 'insightface' in ipadapter else None,
                 "layer_weights": layer_weights,
                 "encode_batch_size": encode_batch_size,
+                "attn_weights": read_custom_weights(custom_weights),
             }
 
             work_model, face_image = ipadapter_execute(work_model, ipadapter_model, clip_vision, **ipa_args)
@@ -722,6 +727,7 @@ class IPAdapterBatch(IPAdapterAdvanced):
                 "image_negative": ("IMAGE",),
                 "attn_mask": ("MASK",),
                 "clip_vision": ("CLIP_VISION",),
+                "custom_weights": ("IPADPTER_ATTN_WEIGHTS", {"default": ""}),
             }
         }
 
@@ -746,6 +752,7 @@ class IPAdapterStyleComposition(IPAdapterAdvanced):
                 "image_negative": ("IMAGE",),
                 "attn_mask": ("MASK",),
                 "clip_vision": ("CLIP_VISION",),
+                "custom_weights": ("IPADPTER_ATTN_WEIGHTS", {"default": ""}),
             }
         }
 
@@ -798,6 +805,7 @@ class IPAdapterFaceID(IPAdapterAdvanced):
                 "attn_mask": ("MASK",),
                 "clip_vision": ("CLIP_VISION",),
                 "insightface": ("INSIGHTFACE",),
+                "custom_weights": ("IPADPTER_ATTN_WEIGHTS", {"default": ""}),
             }
         }
 
@@ -832,6 +840,7 @@ class IPAdapterTiled:
                 "image_negative": ("IMAGE",),
                 "attn_mask": ("MASK",),
                 "clip_vision": ("CLIP_VISION",),
+                "custom_weights": ("IPADPTER_ATTN_WEIGHTS", {"default": ""}),
             }
         }
 
@@ -840,7 +849,7 @@ class IPAdapterTiled:
     FUNCTION = "apply_tiled"
     CATEGORY = "ipadapter/tiled"
 
-    def apply_tiled(self, model, ipadapter, image, weight, weight_type, start_at, end_at, sharpening, combine_embeds="concat", image_negative=None, attn_mask=None, clip_vision=None, embeds_scaling='V only'):
+    def apply_tiled(self, model, ipadapter, image, weight, weight_type, start_at, end_at, sharpening, combine_embeds="concat", image_negative=None, attn_mask=None, clip_vision=None, embeds_scaling='V only', custom_weights=""):
         # 1. Select the models
         if 'ipadapter' in ipadapter:
             ipadapter_model = ipadapter['ipadapter']['model']
@@ -938,6 +947,7 @@ class IPAdapterTiled:
                 "attn_mask": masks[i],
                 "unfold_batch": self.unfold_batch,
                 "embeds_scaling": embeds_scaling,
+                "attn_weights": read_custom_weights(custom_weights),
             }
             # apply the ipadapter to the model without cloning it
             model, _ = ipadapter_execute(model, ipadapter_model, clip_vision, **ipa_args)
@@ -966,6 +976,7 @@ class IPAdapterTiledBatch(IPAdapterTiled):
                 "image_negative": ("IMAGE",),
                 "attn_mask": ("MASK",),
                 "clip_vision": ("CLIP_VISION",),
+                "custom_weights": ("IPADPTER_ATTN_WEIGHTS", {"default": ""}),
             }
         }
 
@@ -987,6 +998,7 @@ class IPAdapterEmbeds:
                 "neg_embed": ("EMBEDS",),
                 "attn_mask": ("MASK",),
                 "clip_vision": ("CLIP_VISION",),
+                "custom_weights": ("IPADPTER_ATTN_WEIGHTS", {"default": ""}),
             }
         }
 
@@ -1082,6 +1094,7 @@ class IPAdapterEncoder:
             "optional": {
                 "mask": ("MASK",),
                 "clip_vision": ("CLIP_VISION",),
+                "custom_weights": ("IPADPTER_ATTN_WEIGHTS", {"default": ""}),
             }
         }
 
@@ -1332,6 +1345,140 @@ class IPAdapterLoadEmbeds:
     def load(self, embeds):
         path = folder_paths.get_annotated_filepath(embeds)
         return (torch.load(path).cpu(), )
+    
+
+import shutil
+js_src_path = os.path.join(os.path.join(os.path.dirname(__file__)), "js", "slider_thing.js")
+
+import folder_paths
+js_dst_path = os.path.join(os.path.join(os.path.dirname(folder_paths.__file__), "web", "extensions", "ipadapter.js"))
+
+shutil.copy(js_src_path, js_dst_path)
+        
+class IPAdapterAttentionWeights:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "values": ("STRING", {"default": "[]", "multiline": True})
+            }
+        }
+
+    RETURN_TYPES=("IPADPTER_ATTN_WEIGHTS", )
+    FUNCTION="main"
+    CATEGORY="ipadapter"
+
+    def main(self, values):
+
+        return (values, )
+    
+
+def lerp_index(arr, fraction):
+    if not arr:
+        return None  # handle empty array case
+    
+    max_index = len(arr) - 1
+    # Calculate the precise float index
+    precise_index = fraction * max_index
+    # Find the indices to interpolate between
+    lower_index = int(precise_index)
+    upper_index = min(lower_index + 1, max_index)
+    
+    # Calculate the interpolated value
+    lower_value = arr[lower_index]
+    upper_value = arr[upper_index]
+    
+    # Interpolation factor
+    interpolation = precise_index - lower_index
+    
+    # Linear interpolation
+    return lower_value + interpolation * (upper_value - lower_value)
+class LoraLoaderModelOnlyBlockWeight:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { 
+            "values": ("STRING", {"default": "[]", "multiline": True}),
+            "model": ("MODEL",),
+            "lora_name": (folder_paths.get_filename_list("loras"), ),
+        }}
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "main"
+
+    def __init__(self):
+        self.loaded_lora = None
+
+    def main(self, values, model, lora_name):
+        
+        lora_path = folder_paths.get_full_path("loras", lora_name)
+        lora = None
+        if self.loaded_lora is not None:
+            if self.loaded_lora[0] == lora_path:
+                lora = self.loaded_lora[1]
+            else:
+                temp = self.loaded_lora
+                self.loaded_lora = None
+                del temp
+
+        if lora is None:
+            lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
+            self.loaded_lora = (lora_path, lora)
+
+        key_map = {}
+        key_map = comfy.lora.model_lora_keys_unet(model.model, key_map)
+        loaded = comfy.lora.load_lora(lora, key_map)
+
+        import json
+        weights = json.loads(values)
+
+
+        block_index = 0
+        i = 0
+        for key, tup in loaded.items():
+            if i > 7:
+                block_index += 1
+                i = 0
+
+            i += 1
+
+        max = block_index
+        block_index = 0
+        i = 0
+        for key, tup in loaded.items():
+            if i > 7:
+                block_index += 1
+                i = 0
+
+            # Extract the elements
+            type = tup[0]
+            tensor_list = list(tup[1])  # Convert the tuple to a list for modification
+            tensor = tensor_list[0]
+
+            weight = lerp_index(weights, (block_index / max))
+
+            # Perform the modification
+            modified_tensor = tensor * weight
+            tensor_list[0] = modified_tensor  # Update the list with the modified tensor
+
+            # Create a new tuple with the modified list and other elements as needed
+            new_tup = (type, tuple(tensor_list))  # Convert the list back to a tuple
+
+            # Assign the new tuple back to the dictionary
+            loaded[key] = new_tup
+
+            i += 1
+            
+
+
+        new_modelpatcher = model.clone()
+        k = new_modelpatcher.add_patches(loaded, 1)
+        k = set(k)
+
+        for x in loaded:
+            if x not in k:
+                print("NOT LOADED", x)
+
+        return (new_modelpatcher,)
+
 
 class IPAdapterWeights:
     @classmethod
@@ -1675,6 +1822,9 @@ NODE_CLASS_MAPPINGS = {
     "IPAdapterPromptScheduleFromWeightsStrategy": IPAdapterPromptScheduleFromWeightsStrategy,
     "IPAdapterRegionalConditioning": IPAdapterRegionalConditioning,
     "IPAdapterCombineParams": IPAdapterCombineParams,
+
+    "IPAdapterAttentionWeights": IPAdapterAttentionWeights,
+    "LoraLoaderModelOnlyBlockWeight": LoraLoaderModelOnlyBlockWeight,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
